@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Step 2 - AI Agent Session</title>
+<style>
+  /* --- Basic page look --- */
+  body { font-family: system-ui, sans-serif; margin: 0; background: #f5f6f8; color: #222; }
+  h1 { font-size: 1.15rem; margin: 0; }
+  header { padding: 14px 20px; background: #fff; border-bottom: 1px solid #e3e5e9; }
+  header small { color: #888; font-weight: normal; }
+  main { max-width: 1000px; margin: 0 auto; padding: 20px; }
+
+  /* --- The pipeline diagram (mirrors step-2.png) --- */
+  .pipeline {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    background: #fff; border: 1px solid #e3e5e9; border-radius: 12px;
+    padding: 18px; margin-bottom: 12px;
+  }
+  .inputs { display: flex; flex-direction: column; gap: 8px; }
+  .box {
+    border: 2px solid #cfd3da; border-radius: 8px; padding: 10px 14px;
+    background: #fafbfc; font-size: 0.85rem; text-align: center;
+    transition: all 0.2s ease; color: #555;
+  }
+  /* A box "lights up" while its pipeline step is running. */
+  .box.active {
+    border-color: #2e7d32; background: #e6f4ea; color: #1b5e20;
+    box-shadow: 0 0 0 3px rgba(46,125,50,0.15); transform: translateY(-1px);
+  }
+  /* If the LLM call fails, its box turns red. */
+  .box.error {
+    border-color: #c62828; background: #fdecea; color: #b71c1c;
+    box-shadow: 0 0 0 3px rgba(198,40,40,0.15);
+  }
+  .arrow { color: #b0b4bc; font-size: 1.3rem; }
+  .box small { color: #999; font-weight: normal; }
+
+  /* Memory stores sit under the pipeline (the bottom half of step-2.png). */
+  .memory {
+    background: #fff; border: 1px solid #e3e5e9; border-radius: 12px;
+    padding: 14px 18px; margin-bottom: 20px;
+  }
+  .memory-label { font-size: 0.75rem; color: #888; margin-bottom: 10px; text-align: center; }
+  .stores { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+  /* The episodic store is live; a blue tint marks it as memory (not a step). */
+  .box.store { border-style: dashed; border-color: #4a7fd0; background: #eff4fc; color: #2b5798; }
+  /* Memory types not built yet - shown faint to preview the full architecture. */
+  .box.planned { opacity: 0.45; }
+
+  /* --- Workspace: chat-list sidebar + chat area --- */
+  .workspace { display: flex; gap: 16px; align-items: flex-start; }
+  .sidebar { width: 190px; flex-shrink: 0; background: #fff; border: 1px solid #e3e5e9; border-radius: 12px; padding: 12px; }
+  #newChat { width: 100%; padding: 9px; border: none; border-radius: 8px; background: #2e7d32; color: #fff; font-size: 0.9rem; cursor: pointer; margin-bottom: 10px; }
+  .chat-item { padding: 8px 10px; border-radius: 8px; font-size: 0.85rem; color: #444; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .chat-item:hover { background: #f0f2f5; }
+  .chat-item.active { background: #e6f4ea; color: #1b5e20; font-weight: 600; }
+  .chat-empty { font-size: 0.8rem; color: #aaa; padding: 6px 10px; }
+
+  /* --- Chat area --- */
+  .chat { flex: 1; background: #fff; border: 1px solid #e3e5e9; border-radius: 12px; padding: 16px; }
+  #messages { min-height: 180px; display: flex; flex-direction: column; gap: 10px; margin-bottom: 12px; }
+  .msg { padding: 9px 13px; border-radius: 10px; max-width: 80%; white-space: pre-wrap; line-height: 1.4; }
+  .msg.user { align-self: flex-end; background: #d7e9ff; }
+  .msg.assistant { align-self: flex-start; background: #eef0f3; }
+  .composer { display: flex; gap: 8px; }
+  #input { flex: 1; padding: 10px; border: 1px solid #cfd3da; border-radius: 8px; font-size: 0.95rem; }
+  #send { padding: 10px 18px; border: none; border-radius: 8px; background: #2e7d32; color: #fff; font-size: 0.95rem; cursor: pointer; }
+  #send:disabled { background: #9db; cursor: default; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Step 2 &mdash; AI Agent Session <small>(episodic memory: RAG over a vector store)</small></h1>
+</header>
+
+<main>
+  <!-- The pipeline. Each .box has a data-stage that matches an event name
+       sent by the server; when that step runs, we add the "active" class.
+       New in step 2: a "Retrieve" step pulls relevant memories before the
+       context is built. Chat History is gone as a direct input - the agent now
+       retrieves it from episodic memory instead. -->
+  <div class="pipeline">
+    <div class="inputs">
+      <div class="box" data-stage="user_prompt">User Prompt</div>
+      <div class="box">System Prompt</div>
+    </div>
+    <span class="arrow">&rarr;</span>
+    <div class="box" data-stage="retrieve">Retrieve<br /><small>RAG top-k</small></div>
+    <span class="arrow">&rarr;</span>
+    <div class="box" data-stage="context">Working Memory<br />/ Context RAM</div>
+    <span class="arrow">&rarr;</span>
+    <div class="box" data-stage="llm">LLM<br />Q&amp;A Agent</div>
+    <span class="arrow">&rarr;</span>
+    <div class="box" data-stage="reply">Reply</div>
+  </div>
+
+  <!-- The memory stores (bottom half of step-2.png). Retrieve reads from
+       Episodic (up); each reply is saved back into it (down). The faint boxes
+       are memory types we have not built yet - shown to preview the whole map. -->
+  <div class="memory">
+    <div class="memory-label">&uarr; retrieve (RAG top-k) &nbsp;&bull;&nbsp; save each reply &darr;</div>
+    <div class="stores">
+      <div class="box store" data-stage="episodic">Episodic Memory<br /><small>vector store (Chroma)</small></div>
+      <div class="box planned">Semantic Memory<br /><small>planned</small></div>
+      <div class="box planned">Procedural Memory<br /><small>planned</small></div>
+      <div class="box planned">Summarizer<br /><small>planned</small></div>
+    </div>
+  </div>
+
+  <!-- The sidebar lists past chats (from GET /sessions). "New Chat" opens a
+       fresh view; clicking a chat loads its turns. Memory is SHARED - retrieval
+       still searches across every chat regardless of which one is open. -->
+  <div class="workspace">
+    <aside class="sidebar">
+      <button id="newChat">+ New Chat</button>
+      <div id="chatList"></div>
+    </aside>
+    <div class="chat">
+      <div id="messages"></div>
+      <div class="composer">
+        <input id="input" placeholder="Type a message and press Enter..." autocomplete="off" />
+        <button id="send">Send</button>
+      </div>
+    </div>
+  </div>
+</main>
+
+<script>
+  const messagesEl = document.getElementById("messages");
+  const inputEl = document.getElementById("input");
+  const sendBtn = document.getElementById("send");
+  const newChatBtn = document.getElementById("newChat");
+  const chatListEl = document.getElementById("chatList");
+  const boxes = document.querySelectorAll(".box");
+
+  // The chat we are currently viewing. Every saved episode is tagged with this,
+  // and it is sent with each message. Kept in localStorage so a refresh reopens
+  // the same chat. Memory (retrieval) is shared across ALL chats regardless.
+  let currentSession = null;
+
+  /** Clear all box highlights (called before each new message). */
+  function resetBoxes() {
+    boxes.forEach(b => b.classList.remove("active", "error"));
+  }
+
+  /** Light up every box belonging to a pipeline stage. */
+  function lightStage(name) {
+    document.querySelectorAll(`.box[data-stage="${name}"]`)
+      .forEach(b => b.classList.add("active"));
+  }
+
+  /** Add a chat bubble and return it so we can stream text into it. */
+  function addBubble(role, text) {
+    const el = document.createElement("div");
+    el.className = "msg " + role;
+    el.textContent = text;
+    messagesEl.appendChild(el);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+    return el;
+  }
+
+  /** Send the message and read the server's live event stream. */
+  async function send() {
+    const text = inputEl.value.trim();
+    if (!text) return;
+
+    resetBoxes();
+    inputEl.value = "";
+    sendBtn.disabled = true;
+    addBubble("user", text);
+    const replyBubble = addBubble("assistant", "");
+
+    const response = await fetch("/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: text, session_id: currentSession }),
+    });
+
+    // Read the Server-Sent Events stream chunk by chunk.
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      // SSE events are separated by a blank line; each line starts "data: ".
+      const parts = buffer.split("\n\n");
+      buffer = parts.pop();  // keep the last, possibly-incomplete piece
+      for (const part of parts) {
+        if (!part.startsWith("data: ")) continue;
+        const event = JSON.parse(part.slice(6));
+        handleEvent(event, replyBubble);
+      }
+    }
+    sendBtn.disabled = false;
+    inputEl.focus();
+    // A brand-new chat now has its first saved turn - refresh the list so it
+    // appears (and its title/highlight update).
+    loadSessions();
+  }
+
+  /** React to one event from the agent. */
+  function handleEvent(event, replyBubble) {
+    if (event.type === "stage") {
+      lightStage(event.name);
+    } else if (event.type === "token") {
+      replyBubble.textContent += event.text;
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    } else if (event.type === "error") {
+      document.querySelector('.box[data-stage="llm"]').classList.add("error");
+      replyBubble.textContent = "Error: " + event.message;
+    }
+  }
+
+  /** Rebuild the visible chat from one session's stored turns. */
+  async function loadHistory(sessionId) {
+    const response = await fetch("/history?session=" + encodeURIComponent(sessionId));
+    const history = await response.json();
+    messagesEl.innerHTML = "";
+    history.forEach(m => addBubble(m.role, m.content));
+  }
+
+  /** Fetch the list of chats and render the sidebar, highlighting the open one. */
+  async function loadSessions() {
+    const sessions = await (await fetch("/sessions")).json();
+    chatListEl.innerHTML = "";
+    if (!sessions.length) {
+      chatListEl.innerHTML = '<div class="chat-empty">No chats yet</div>';
+      return;
+    }
+    for (const s of sessions) {
+      const item = document.createElement("div");
+      item.className = "chat-item" + (s.session_id === currentSession ? " active" : "");
+      item.textContent = s.title;
+      item.title = s.title;
+      item.addEventListener("click", () => selectSession(s.session_id));
+      chatListEl.appendChild(item);
+    }
+  }
+
+  /** Open an existing chat: load its turns and mark it active. */
+  async function selectSession(sessionId) {
+    currentSession = sessionId;
+    localStorage.setItem("session", sessionId);
+    await loadHistory(sessionId);
+    await loadSessions();
+  }
+
+  /** Start a fresh chat: a new id and an empty view (memory is untouched). */
+  function newChat() {
+    currentSession = crypto.randomUUID();
+    localStorage.setItem("session", currentSession);
+    messagesEl.innerHTML = "";
+    loadSessions();
+    inputEl.focus();
+  }
+
+  /** On load, reopen the last chat (or the newest, or a fresh one). */
+  async function init() {
+    currentSession = localStorage.getItem("session");
+    if (!currentSession) {
+      const sessions = await (await fetch("/sessions")).json();
+      currentSession = sessions.length ? sessions[0].session_id : crypto.randomUUID();
+      localStorage.setItem("session", currentSession);
+    }
+    await loadSessions();
+    await loadHistory(currentSession);
+  }
+
+  sendBtn.addEventListener("click", send);
+  inputEl.addEventListener("keydown", e => { if (e.key === "Enter") send(); });
+  newChatBtn.addEventListener("click", newChat);
+  init();
+</script>
+</body>
+</html>
