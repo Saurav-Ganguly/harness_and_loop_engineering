@@ -18,5 +18,7 @@ wheels/
 .pytest_cache/
 .playwright-mcp/
 
-# Runtime memory data (the vector store is local, not source)
-memory/
+# Runtime memory data (the vector store + personal facts are local, not source).
+# The procedural skills ARE source, so keep only those under version control.
+memory/*
+!memory/procedural_memory/

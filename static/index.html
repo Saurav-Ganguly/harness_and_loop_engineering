@@ -49,6 +49,18 @@
   /* Memory types not built yet - shown faint to preview the full architecture. */
   .box.planned { opacity: 0.45; }
 
+  /* --- Durable facts panel (semantic memory contents) --- */
+  .facts {
+    background: #fff; border: 1px solid #e3e5e9; border-radius: 12px;
+    padding: 14px 18px; margin-bottom: 20px;
+  }
+  .facts-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+  .facts-head span { font-size: 0.9rem; font-weight: 600; }
+  .facts-head small { color: #999; font-weight: normal; }
+  #factsList { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+  #factsList li { font-size: 0.85rem; color: #2b5798; background: #eff4fc; border-radius: 8px; padding: 6px 10px; }
+  .facts-empty { font-size: 0.8rem; color: #aaa; }
+
   /* --- Workspace: chat-list sidebar + chat area --- */
   .workspace { display: flex; gap: 16px; align-items: flex-start; }
   .sidebar { width: 190px; flex-shrink: 0; background: #fff; border: 1px solid #e3e5e9; border-radius: 12px; padding: 12px; }
@@ -72,7 +84,7 @@
 </head>
 <body>
 <header>
-  <h1>Step 2 &mdash; AI Agent Session <small>(episodic memory: RAG over a vector store)</small></h1>
+  <h1>Step 2 &mdash; AI Agent Session <small>(episodic memory + semantic facts)</small></h1>
 </header>
 
 <main>
@@ -103,10 +115,22 @@
     <div class="memory-label">&uarr; retrieve (RAG top-k) &nbsp;&bull;&nbsp; save each reply &darr;</div>
     <div class="stores">
       <div class="box store" data-stage="episodic">Episodic Memory<br /><small>vector store (Chroma)</small></div>
-      <div class="box planned">Semantic Memory<br /><small>planned</small></div>
-      <div class="box planned">Procedural Memory<br /><small>planned</small></div>
-      <div class="box planned">Summarizer<br /><small>planned</small></div>
+      <div class="box store" data-stage="semantic">Semantic Memory<br /><small>durable facts (JSON)</small></div>
+      <div class="box store" data-stage="procedural">Procedural Memory<br /><small id="skillStatus">skill.md match</small></div>
+      <div class="box store" data-stage="consolidate">Summarizer<br /><small>gemma4 (cloud)</small></div>
     </div>
+  </div>
+
+  <!-- Semantic memory: the durable facts the summarizer distills from episodes.
+       These are injected into EVERY turn (always in context, not retrieved).
+       Consolidation runs automatically - every N exchanges, and whenever you
+       leave a chat via "New Chat". Watch a contradiction (red -> blue Tesla)
+       collapse into a single fact here after consolidation. -->
+  <div class="facts">
+    <div class="facts-head">
+      <span>Durable facts <small>(semantic memory - auto-consolidated)</small></span>
+    </div>
+    <ul id="factsList"></ul>
   </div>
 
   <!-- The sidebar lists past chats (from GET /sessions). "New Chat" opens a
@@ -133,6 +157,7 @@
   const sendBtn = document.getElementById("send");
   const newChatBtn = document.getElementById("newChat");
   const chatListEl = document.getElementById("chatList");
+  const factsListEl = document.getElementById("factsList");
   const boxes = document.querySelectorAll(".box");
 
   // The chat we are currently viewing. Every saved episode is tagged with this,
@@ -149,6 +174,15 @@
   function lightStage(name) {
     document.querySelectorAll(`.box[data-stage="${name}"]`)
       .forEach(b => b.classList.add("active"));
+  }
+
+  /** Show which skill the procedural selector matched (or the nearest near-miss). */
+  function showSkill(event) {
+    const el = document.getElementById("skillStatus");
+    const d = event.distance === null ? "n/a" : event.distance.toFixed(2);
+    if (event.matched) el.textContent = "matched: " + event.skill + " (" + d + ")";
+    else if (event.skill) el.textContent = "no skill (nearest " + event.skill + " " + d + ")";
+    else el.textContent = "no skills loaded";
   }
 
   /** Add a chat bubble and return it so we can stream text into it. */
@@ -202,12 +236,15 @@
     // A brand-new chat now has its first saved turn - refresh the list so it
     // appears (and its title/highlight update).
     loadSessions();
+    // Auto-consolidation may have fired this turn - refresh the facts panel.
+    loadFacts();
   }
 
   /** React to one event from the agent. */
   function handleEvent(event, replyBubble) {
     if (event.type === "stage") {
       lightStage(event.name);
+      if (event.name === "procedural") showSkill(event);
     } else if (event.type === "token") {
       replyBubble.textContent += event.text;
       messagesEl.scrollTop = messagesEl.scrollHeight;
@@ -251,8 +288,41 @@
     await loadSessions();
   }
 
-  /** Start a fresh chat: a new id and an empty view (memory is untouched). */
-  function newChat() {
+  /** Fetch the durable facts (semantic memory) and render the panel. */
+  async function loadFacts() {
+    const facts = await (await fetch("/facts")).json();
+    factsListEl.innerHTML = "";
+    if (!facts.length) {
+      factsListEl.innerHTML = '<li class="facts-empty">No facts yet - chat a little; memory consolidates automatically.</li>';
+      return;
+    }
+    facts.forEach(f => {
+      const li = document.createElement("li");
+      li.textContent = f;
+      factsListEl.appendChild(li);
+    });
+  }
+
+  /** Run the summarizer: distill episodes into reconciled facts.
+
+      Auto-triggered (no button): the agent also does this every N exchanges;
+      this call fires when you leave a chat via "New Chat". */
+  async function consolidateNow() {
+    lightStage("consolidate");
+    try {
+      await fetch("/consolidate", { method: "POST" });
+      await loadFacts();
+    } finally {
+      boxes.forEach(b => b.classList.remove("active"));
+    }
+  }
+
+  /** Start a fresh chat. Leaving a chat with content consolidates it into
+      semantic memory first, then opens an empty view (memory is untouched). */
+  async function newChat() {
+    if (messagesEl.children.length > 0) {
+      await consolidateNow();
+    }
     currentSession = crypto.randomUUID();
     localStorage.setItem("session", currentSession);
     messagesEl.innerHTML = "";
@@ -270,6 +340,7 @@
     }
     await loadSessions();
     await loadHistory(currentSession);
+    await loadFacts();
   }
 
   sendBtn.addEventListener("click", send);

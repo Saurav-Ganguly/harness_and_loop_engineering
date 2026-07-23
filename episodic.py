@@ -70,6 +70,10 @@ class EpisodicStore:
             metadatas=[metadata],
         )
 
+    def count(self) -> int:
+        """Total number of stored episodes across all chats."""
+        return self.collection.count()
+
     def retrieve(self, query: str, k: int = 3) -> list[dict]:
         """Return the k most relevant past episodes across ALL chats (top-k search).
 

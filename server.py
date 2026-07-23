@@ -22,6 +22,9 @@ from ollama import Client
 
 from agent import ChatAgent
 from episodic import EpisodicStore
+from procedural import ProceduralStore
+from semantic import SemanticStore
+from summarizer import Summarizer
 
 # Load variables from the .env file into the environment.
 # We never read .env directly - we just ask for the value by name.
@@ -42,8 +45,24 @@ embed_client = Client()
 # Episodic memory: a vector store the agent reads from and writes to.
 store = EpisodicStore(embed_client=embed_client)
 
-# One agent for this running server. Its memory now lives on disk in the store.
-agent = ChatAgent(client=chat_client, store=store)
+# Semantic memory: a flat file of durable facts, always injected into context.
+semantic = SemanticStore()
+
+# Procedural memory: skill.md files matched to a message by embedding similarity.
+# Embeds each skill's description once (via the local embed client), then the
+# matched skill's procedure is injected into context.
+procedural = ProceduralStore(embed_client=embed_client)
+
+# The summarizer distills episodes into reconciled facts. It runs on the CLOUD
+# (gemma4) - the local model was too slow. Cloud ignores structured outputs, so
+# the summarizer parses one-fact-per-line text instead.
+summarizer = Summarizer(client=chat_client)
+
+# One agent for this running server. Its memory now lives on disk in the stores.
+# It auto-consolidates via the summarizer every N turns; "Consolidate" runs it now.
+agent = ChatAgent(
+    client=chat_client, store=store, semantic=semantic, summarizer=summarizer, procedural=procedural
+)
 
 app = FastAPI()
 
@@ -73,6 +92,26 @@ def history(session: str | None = None):
 def sessions():
     """List all chats (id, title, start time, count) so the UI can show them."""
     return store.sessions()
+
+
+@app.get("/facts")
+def facts():
+    """Return the current durable facts (semantic memory) for the UI panel."""
+    return semantic.all()
+
+
+@app.post("/consolidate")
+def consolidate():
+    """Run the summarizer now: distill all episodes into reconciled facts.
+
+    Reads every episode plus the current facts, replaces the fact set with the
+    summarizer's reconciled output, and returns it. This is the manual button;
+    the agent also does this automatically every N turns.
+    """
+    episodes = store.all()
+    new_facts = summarizer.consolidate(episodes, semantic.all())
+    semantic.replace(new_facts)
+    return new_facts
 
 
 def to_sse(events) -> str:

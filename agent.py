@@ -32,6 +32,9 @@ RETRIEVE_K = 3
 # How many recent exchanges of the CURRENT chat to always include (for continuity).
 RECENT_EXCHANGES = 3
 
+# How many exchanges before the summarizer auto-consolidates episodes into facts.
+CONSOLIDATE_EVERY = 5
+
 # A small pause per step so you can watch the boxes light up in the browser.
 STAGE_DWELL_SECONDS = 0.3
 
@@ -44,18 +47,40 @@ class ChatAgent:
     run without the network.
     """
 
-    def __init__(self, client, store):
+    def __init__(self, client, store, semantic, summarizer, procedural):
         self.client = client
         self.store = store
+        self.semantic = semantic
+        self.summarizer = summarizer
+        self.procedural = procedural
 
-    def build_context(self, user_message: str, retrieved: list[dict], recent: list[dict]) -> list[dict]:
+    def build_context(
+        self,
+        user_message: str,
+        facts: list[str],
+        skill_body: str | None,
+        retrieved: list[dict],
+        recent: list[dict],
+    ) -> list[dict]:
         """Assemble the messages we send to the model.
 
-        = system prompt, then retrieved memories (relevant, from any chat),
-        then the recent turns of the current chat, then the new message. Both
+        = system prompt, then durable facts (semantic memory) as a SEPARATE
+        system block, then the matched skill (procedural memory) as its own
+        system block, then retrieved memories (relevant, from any chat), then
+        the recent turns of the current chat, then the new message. The episode
         blocks are replayed as real user/assistant turns, oldest first.
         """
         context = [{"role": "system", "content": SYSTEM_PROMPT}]
+        if facts:
+            context.append({
+                "role": "system",
+                "content": "What you know about the user:\n" + "\n".join(f"- {f}" for f in facts),
+            })
+        if skill_body:
+            context.append({
+                "role": "system",
+                "content": "Follow this procedure for the user's request:\n\n" + skill_body,
+            })
         for episode in retrieved + recent:
             context.append({"role": "user", "content": episode["user"]})
             context.append({"role": "assistant", "content": episode["assistant"]})
@@ -80,8 +105,21 @@ class ChatAgent:
         yield {"type": "stage", "name": "retrieve"}
         time.sleep(STAGE_DWELL_SECONDS)
 
-        # Step 3: assemble system prompt + retrieved + recent + new message.
-        context = self.build_context(user_message, retrieved, recent)
+        # Step 3: load durable facts from semantic memory (always in context).
+        facts = self.semantic.all()
+        yield {"type": "stage", "name": "semantic"}
+        time.sleep(STAGE_DWELL_SECONDS)
+
+        # Step 4: pick a procedural skill for this message (or none if nothing fits).
+        # We report the nearest candidate + distance either way so the UI can show
+        # both a match and a near-miss.
+        skill = self.procedural.select(user_message)
+        yield {"type": "stage", "name": "procedural", "matched": skill["matched"],
+               "skill": skill["name"], "distance": skill["distance"]}
+        time.sleep(STAGE_DWELL_SECONDS)
+
+        # Step 5: assemble system prompt + facts + skill + retrieved + recent + new message.
+        context = self.build_context(user_message, facts, skill["body"], retrieved, recent)
         yield {"type": "stage", "name": "context"}
         time.sleep(STAGE_DWELL_SECONDS)
 
@@ -107,4 +145,12 @@ class ChatAgent:
         # tagged with this chat, so future turns (in any chat) can retrieve it.
         self.store.add(user_message, full_reply, session_id)
         yield {"type": "stage", "name": "episodic"}
+
+        # Step 7: every N exchanges, the summarizer consolidates all episodes
+        # into reconciled durable facts and replaces the semantic store.
+        if self.store.count() % CONSOLIDATE_EVERY == 0:
+            new_facts = self.summarizer.consolidate(self.store.all(), self.semantic.all())
+            self.semantic.replace(new_facts)
+            yield {"type": "stage", "name": "consolidate"}
+
         yield {"type": "done"}
