@@ -20,11 +20,12 @@ Repo: https://github.com/Saurav-Ganguly/harness_and_loop_engineering
 History is a plain in-memory list on the server (the single source of truth); the
 browser rebuilds it on load via `GET /history`. Nothing survives a server restart yet.
 
-**Step 2 (in progress) — the memory system** (see [step-2.png](docs/step-2.png)).
-Three memory types feed working memory: **procedural** (skill/.md files — how to act),
-**semantic** (vector store of durable facts + user profile), **episodic** (vector store
-of timestamped chat history). After N chats a cheaper summarizer agent distills episodes
-into semantic facts. We build it in increments, validating each before moving on:
+**Step 2 (done) — the memory system** (see [step-2.png](docs/step-2.png)).
+Three memory types feed working memory: **episodic** (Chroma vector store of
+timestamped chat history), **semantic** (flat JSON file of durable facts + user
+profile, injected whole every turn), **procedural** (skill.md files — how to act).
+After N turns a cheaper summarizer agent distills episodes into semantic facts. Built
+in increments, each validated before moving on:
 
 1. **Persistence + episodic (done)** — turns saved to disk so memory survives a
    restart. (Started as a JSON file; increment 2 replaced it with the vector store.)
@@ -38,17 +39,36 @@ into semantic facts. We build it in increments, validating each before moving on
      own turns, but retrieval is **shared** across every chat. Endpoints: `/sessions`,
      `/history?session=<id>`, and `/chat` takes `session_id`. This is what lets two
      chats hold contradicting facts (red vs blue Tesla) - which the summarizer
-     (increment 3) will resolve.
-3. **Semantic + summarizer (next)** — after N turns a cheaper model distills episodes
-   into durable facts; retrieved by RAG.
-4. **Procedural** — load `.md` skill files into the system prompt (how to act).
+     (increment 3) resolves.
+3. **Semantic + summarizer (done)** — semantic memory is a **flat JSON file**
+   (`memory/facts.json`), not a vector store: the fact set is small and always
+   relevant, so ALL facts are injected as a system block every turn. A cheaper cloud
+   model (`gemma4:cloud`) consolidates: every N total episodes (and on New Chat) it
+   reads all episodes + current facts and REWRITES the reconciled fact set, collapsing
+   contradictions. Ollama Cloud ignores structured outputs, so it parses
+   one-fact-per-line text.
+4. **Procedural (done)** — skills live at `memory/procedural_memory/<name>/skill.md`
+   (name + description trigger + body procedure). Selection is retrieval again: each
+   skill's **description** is embedded once (cached in a Chroma `procedural`
+   collection, new skills only), the incoming message is embedded, and the nearest
+   skill wins **only if** it clears a distance threshold (1.15, calibrated). Top-1;
+   no match = no skill. The matched body is injected as its own system block. The UI's
+   Procedural Memory box shows the match (or nearest near-miss) + distance.
+
+Deferred improvements are tracked in [docs/memory-backlog.md](docs/memory-backlog.md)
+(headlined by incremental/watermarked consolidation). **Next: loop engineering.**
 
 ## Tech / model
 
 - **Chat model: Ollama cloud** (`https://ollama.com`) via the `ollama` library. Model: `deepseek-v4-flash`.
 - **Embedding model: local Ollama** (`http://localhost:11434`, no key). Model: `embeddinggemma`
   (`ollama pull embeddinggemma`). Ollama cloud has **no** embedding model, so embeddings must run locally.
-- **Vector store: Chroma** (`chromadb`), persisted at `memory/chroma/`.
+- **Summarizer model: Ollama cloud** (`gemma4:cloud`) — distills episodes into facts.
+- **Vector store: Chroma** (`chromadb`), persisted at `memory/chroma/` — collections
+  `episodes` (episodic) and `procedural` (skill description embeddings).
+- **Semantic facts:** flat JSON at `memory/facts.json`. **Procedural skills:**
+  `memory/procedural_memory/<name>/skill.md`. Both under `memory/`, but the skills are
+  version-controlled (source) while the vector store + facts stay git-ignored (local).
 - Auth key is in `.env` as `ollama_key` (see `.env.example`). `.env` is git-ignored.
   **NEVER read `.env`.** Ask Saurav for any value needed.
 - Web: FastAPI + Server-Sent Events + a single vanilla HTML page (no build step).
@@ -56,14 +76,24 @@ into semantic facts. We build it in increments, validating each before moving on
 
 ## Source files
 
-- [agent.py](agent.py) — the harness: retrieves from the store, assembles context,
-  calls the LLM, saves the exchange, yields a stage event per step. Knows nothing about the web.
+- [agent.py](agent.py) — the harness: retrieves episodes, loads facts, selects a skill,
+  assembles context, calls the LLM, saves the exchange, consolidates every N turns,
+  yields a stage event per step. Knows nothing about the web.
 - [episodic.py](episodic.py) — the episodic memory vector store: embed via local Ollama,
-  `add` / `retrieve` (top-k) / `all`, backed by Chroma.
+  `add` / `retrieve` (top-k) / `recent` / `all` / `count` / `sessions`, backed by Chroma.
+- [semantic.py](semantic.py) — semantic memory: a flat JSON list of durable facts,
+  `all` / `replace`. No embeddings — injected whole every turn.
+- [summarizer.py](summarizer.py) — the summarizer agent: `consolidate(episodes, facts)`
+  distills + reconciles into a new fact set via the cheap cloud model.
+- [procedural.py](procedural.py) — procedural memory: loads `skill.md` bodies from disk,
+  caches description embeddings in Chroma, `select(message)` returns the matched skill or
+  none by a distance threshold.
 - [server.py](server.py) — FastAPI plumbing: builds the cloud chat client + local embed
-  client + store, serves the page, streams events as SSE, exposes `GET /history`.
-- [static/index.html](static/index.html) — chat UI + the pipeline diagram.
-- [test_agent.py](test_agent.py) — agent tests (no network; uses a fake client).
+  client + all stores, serves the page, streams events as SSE, exposes `/history`,
+  `/sessions`, `/facts`, `/consolidate`.
+- [static/index.html](static/index.html) — chat UI + the pipeline diagram + facts panel.
+- [test_agent.py](test_agent.py), [test_semantic.py](test_semantic.py),
+  [test_summarizer.py](test_summarizer.py) — tests (no network; use fakes/tmp files).
 
 ## Reference
 

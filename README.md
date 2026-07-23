@@ -7,21 +7,32 @@ data-flow diagram lights up box-by-box as each step runs, so you can *watch* wha
 the agent does.
 
 - **Chat model:** `deepseek-v4-flash` on [ollama.com](https://ollama.com) (cloud).
+- **Summarizer model:** `gemma4:cloud` (the cheaper model that distills facts).
 - **Embedding model:** `embeddinggemma` on a **local** Ollama daemon (Ollama cloud
   has no embedding model, so embeddings must run locally).
 - **Web:** FastAPI + Server-Sent Events + one vanilla HTML page (no build step).
 
-## What it does (Step 2: episodic memory + RAG)
+## What it does (Step 2: the memory system)
 
-The conversation is stored as **episodic memory** in a **Chroma vector store**.
-Each user+assistant exchange is embedded and saved. On every new message the agent
-builds a **hybrid context**: the top-k most relevant past exchanges (retrieved
-across *all* chats) + the current chat's recent turns + your new message. That's
-Retrieval-Augmented Generation (RAG). Memory survives a server restart.
+Three memory types feed the agent's working memory (context) on every turn:
 
-There are **multiple chats**: a "New Chat" button and a sidebar of past chats.
-Each chat's view shows only its own turns, but memory is **shared** — retrieval
-searches across every chat.
+- **Episodic** — the conversation, stored in a **Chroma vector store**. Each
+  user+assistant exchange is embedded and saved. Each message builds a **hybrid
+  context**: the top-k most relevant past exchanges (retrieved across *all* chats) +
+  the current chat's recent turns + your new message. That's RAG. There are **multiple
+  chats** (a "New Chat" button + a sidebar); each chat's view shows only its own turns,
+  but memory is **shared** — retrieval searches across every chat.
+- **Semantic** — durable facts about you (a flat `memory/facts.json`), injected whole
+  every turn. A cheaper model (`gemma4:cloud`) **consolidates** every N turns: it reads
+  the episodes and rewrites a reconciled fact set, collapsing contradictions (say a red
+  Tesla, later a blue one → one current fact).
+- **Procedural** — reusable **skills** (`memory/procedural_memory/<name>/skill.md`) that
+  tell the agent *how* to do a task. Each message is matched against the skills by
+  embedding similarity; if one clears a threshold, its procedure is injected. Ships with
+  `prompt_enhancer`, `idea_rater`, `idea_enhancer`.
+
+Memory survives a server restart. The pipeline diagram lights up each memory step as it
+runs, and the Procedural box shows which skill matched (or the nearest near-miss).
 
 ## Prerequisites
 
@@ -80,12 +91,16 @@ Chroma.
 
 | File | Role |
 |------|------|
-| `agent.py` | The harness: retrieve + recent → build context → call LLM → save the exchange. |
-| `episodic.py` | The episodic memory vector store: `embed`, `add`, `retrieve` (top-k), `recent`, `all`, `sessions`. |
-| `server.py` | FastAPI plumbing: cloud chat client + local embed client + store; endpoints `/chat`, `/history?session=`, `/sessions`. |
-| `static/index.html` | Chat UI + chat-list sidebar + the live pipeline diagram. |
-| `test_agent.py` | Agent tests (no network, no Chroma). |
-| `docs/` | The step diagrams and scraped Ollama API docs. |
+| `agent.py` | The harness: retrieve + facts + skill → build context → call LLM → save → consolidate. |
+| `episodic.py` | The episodic memory vector store: `embed`, `add`, `retrieve` (top-k), `recent`, `all`, `count`, `sessions`. |
+| `semantic.py` | Semantic memory: a flat JSON list of durable facts (`all`, `replace`). |
+| `summarizer.py` | The summarizer agent: `consolidate(episodes, facts)` distills + reconciles the fact set. |
+| `procedural.py` | Procedural memory: loads `skill.md` files, embeds their triggers, `select(message)` matches a skill or none. |
+| `server.py` | FastAPI plumbing: cloud chat + local embed clients + stores; endpoints `/chat`, `/history?session=`, `/sessions`, `/facts`, `/consolidate`. |
+| `static/index.html` | Chat UI + chat-list sidebar + facts panel + the live pipeline diagram. |
+| `memory/procedural_memory/` | The skill files (source): `prompt_enhancer`, `idea_rater`, `idea_enhancer`. |
+| `test_agent.py`, `test_semantic.py`, `test_summarizer.py` | Tests (no network, no Chroma). |
+| `docs/` | The step diagrams, scraped Ollama API docs, and the memory improvement backlog. |
 
 ## Notes
 
